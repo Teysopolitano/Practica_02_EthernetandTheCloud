@@ -82,7 +82,7 @@
 #define EXAMPLE_MQTT_SERVER_HOST "io.adafruit.com" //"postman.cloudmqtt.com"
 
 #define EXAMPLE_MQTT_USER "Teyson"
-#define EXAMPLE_MQTT_PSWD "aio_wBnc90pN1BDdgwlVv7Mjo0oUIKRb"
+#define EXAMPLE_MQTT_PSWD "aio_sDRX804PvPDi7FKRJFb1XJgiImEg"
 
 /*! @brief MQTT server port number. */
 #define EXAMPLE_MQTT_SERVER_PORT 1883
@@ -95,23 +95,51 @@
 #define APP_THREAD_PRIO DEFAULT_THREAD_PRIO
 
 #define MQTT_CONNECTED_EVT		( 1 << 0 )
-#define MQTT_SENSOR_EVT			( 1 << 1 )
-#define MQTT_SPRINKLERS_EVT		( 1 << 2 )
+#define MQTT_SENSOR_EVT         ( 1 << 1 )
+#define MQTT_NOTIF_EVT	        ( 1 << 2 )
 #define MQTT_DISCONNECTED_EVT	( 1 << 3 )
+
 
 #define BOARD_LED_GPIO BOARD_LED_RED_GPIO
 #define BOARD_LED_GPIO_PIN BOARD_LED_RED_GPIO_PIN
+
+#define MAX_MOIST 85U
+#define MIN_MOIST 15U
+#define MAX_LIGHT (uint16_t)400U
+#define MIN_LIGHT (uint16_t)100U
+#define MAX_TEMP  (uint8_t)30U
+#define MIN_TEMP  (uint8_t)10U
+
+typedef enum
+{
+	LOW_LIGHT,
+	HIGH_LIGHT,
+	LOW_TEMP,
+	HIGH_TEMP,
+	LOW_MOIST,
+	HIGH_MOIST
+}status_e;
+
+typedef enum
+{
+	MOISTURE,
+	LIGHT,
+	TEMPERATURE
+}topic_e;
 
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
 
 static void connect_to_mqtt(void *ctx);
-static int32_t get_simulated_sensor(int32_t current_value, int32_t max_step,
-		                     int32_t min_value, int32_t max_value,
-							 bool increase);
+//static int32_t get_simulated_sensor(int32_t current_value, int32_t max_step,
+//		                     int32_t min_value, int32_t max_value,
+//							 bool increase);
 static void sensor_timer_callback(TimerHandle_t pxTimer);
-static void publish_humidity(void *ctx);
+static void publish_status(void *ctx);
+//static void publish_waterpump_status(void *ctx);
+//static void publish_lights_status(void *ctx);
+//static void publish_air_status(void *ctx);
 
 
 /*******************************************************************************
@@ -147,10 +175,13 @@ EventGroupHandle_t xEventGroup;
 
 TimerHandle_t xTimerSensor;
 
-uint32_t humidity_sensor = 50;
-uint32_t samples_cnt = 0;
-bool sprinklers_on;
-
+uint8_t waterpump_stat, lights_stat, air_stat = 0;
+//uint32_t humidity_sensor = 50;
+//uint32_t samples_cnt = 0;
+//bool sprinklers_on;
+volatile bool waterpump_on, lights_on, air_on = false;
+status_e home_status;
+topic_e in_topic;
 
 /*******************************************************************************
  * Code
@@ -178,7 +209,17 @@ static void mqtt_topic_subscribed_cb(void *arg, err_t err)
  */
 static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
 {
-    LWIP_UNUSED_ARG(arg);
+   	LWIP_UNUSED_ARG(arg);
+
+	if (!(strcmp(topic,"Teyson/feeds/soil-moisture")))
+		in_topic = MOISTURE;
+
+	else if (!(strcmp(topic,"Teyson/feeds/light")))
+		in_topic = LIGHT;
+
+	else if (!(strcmp(topic,"Teyson/feeds/temperature")))
+		in_topic = TEMPERATURE;
+
 
     PRINTF("Received %u bytes from the topic \"%s\": \"", tot_len, topic);
 
@@ -190,14 +231,18 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len
 static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t flags)
 {
     int i;
+    char data_temp[3];
 
     LWIP_UNUSED_ARG(arg);
+
+    memset(data_temp, 0, 3);
 
     for (i = 0; i < len; i++)
     {
         if (isprint(data[i]))
         {
             PRINTF("%c", (char)data[i]);
+            data_temp[i] = data[i];
         }
         else
         {
@@ -205,14 +250,69 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len, u8_t f
         }
     }
 
-    if(!memcmp(data, "On", 2)) {
-    	sprinklers_on = true;
-    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
+    switch (in_topic)
+    {
+    case MOISTURE :
+
+    	if (atoi(data_temp) <= (u8_t)MIN_MOIST)
+    	    /*Turn the water pump on*/
+    		waterpump_on = true;
+
+    	else if (atoi(data_temp) >= (u8_t)MAX_MOIST)
+    	   /*Turn water pump off*/
+    		waterpump_on = false;
+
+    	break;
+
+    case LIGHT :
+
+    	if (atoi(data_temp) <= (u16_t)MIN_LIGHT)
+    	{
+        	/*Set low light level status and turn the lights on*/
+        	lights_on = true;
+    		home_status = LOW_LIGHT;
+    	}
+        else if (atoi(data_temp) >= (u16_t)MAX_LIGHT)
+        {
+        	/*Set high light level status and turn the lights off*/
+        	lights_on = false;
+        	home_status = HIGH_LIGHT;
+        }
+    	break;
+
+    case TEMPERATURE :
+
+    	if (atoi(data_temp) <= (u8_t)MIN_TEMP)
+    	{
+    	   	/*Set low temperature status and turn the air conditioner off*/
+    		air_on = false;
+    	    home_status = LOW_TEMP;
+    	}
+    	else if (atoi(data_temp) >= (u8_t)MAX_TEMP)
+    	{
+    		/*Set high temperature status and turn the air conditioner on*/
+    	    air_on = true;
+    		home_status = HIGH_TEMP;
+    	}
+
+    	break;
+
+    default:
+    	break;
     }
-    else if(!memcmp(data, "Off", 3)) {
-    	sprinklers_on = false;
-    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
-    }
+
+
+    xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_EVT);
+
+
+//    if(!memcmp(data, "On", 2)) {
+//    	sprinklers_on = true;
+//    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
+//    }
+//    else if(!memcmp(data, "Off", 3)) {
+//    	sprinklers_on = false;
+//    	xEventGroupSetBits(xEventGroup,	MQTT_SPRINKLERS_EVT);
+//    }
 
     if (flags & MQTT_DATA_FLAG_LAST)
     {
@@ -325,23 +425,76 @@ static void mqtt_message_published_cb(void *arg, err_t err)
     }
 }
 
+///*!
+// * @brief Publishes a message. To be called on tcpip_thread.
+// */
+//static void publish_humidity(void *ctx)
+//{
+//    static const char *topic   = "Teyson/feeds/humidity";
+//    static char message[10];
+//
+//    LWIP_UNUSED_ARG(ctx);
+//
+//    memset(message, 0, 10);
+//    sprintf(message, "%d", humidity_sensor);
+//
+//    PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
+//
+//    mqtt_publish(mqtt_client, topic, message, strlen(message), 1, 0, mqtt_message_published_cb, (void *)topic);
+//}
+
 /*!
  * @brief Publishes a message. To be called on tcpip_thread.
  */
-static void publish_humidity(void *ctx)
+static void publish_status(void *ctx)
 {
-    static const char *topic   = "Teyson/feeds/humidity";
-    static char message[10];
+    static const char *topic; //= "Teyson/feeds/status-message";
+    static char message[2];
 
     LWIP_UNUSED_ARG(ctx);
 
-    memset(message, 0, 10);
-    sprintf(message, "%d", humidity_sensor);
+    memset(message, 0, 2);
+
+    switch (in_topic)
+    {
+    case MOISTURE:
+    	topic = "Teyson/feeds/water-pump";
+    	sprintf(message,  "%d", waterpump_stat);
+    	break;
+
+    case LIGHT:
+    	topic = "Teyson/feeds/lights-on";
+    	sprintf(message,  "%d", lights_stat);
+    	break;
+
+    case TEMPERATURE:
+    	topic = "Teyson/feeds/air-conditioner-on";
+    	sprintf(message,  "%d", air_stat);
+    	break;
+    }
 
     PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
 
     mqtt_publish(mqtt_client, topic, message, strlen(message), 1, 0, mqtt_message_published_cb, (void *)topic);
 }
+
+///*!
+// * @brief Publishes a message. To be called on tcpip_thread.
+// */
+//static void publish_waterpump_status(void *ctx)
+//{
+//    static const char *topic = "Teyson/feeds/water-pump";
+//    static char message[2];
+//
+//    LWIP_UNUSED_ARG(ctx);
+//
+//    memset(message, 0, 2);
+//    sprintf(message,  "%d", waterpump_stat);
+//
+//    PRINTF("Going to publish to the topic \"%s\"...\r\n", topic);
+//
+//    mqtt_publish(mqtt_client, topic, message, strlen(message), 1, 0, mqtt_message_published_cb, (void *)topic);
+//}
 
 /*!
  * @brief Application thread.
@@ -433,7 +586,7 @@ static void app_thread(void *arg)
 		// the event group.  Clear the bits before exiting.
 		uxBits = xEventGroupWaitBits(
 					xEventGroup,	// The event group being tested.
-					MQTT_CONNECTED_EVT | MQTT_SENSOR_EVT | MQTT_SPRINKLERS_EVT | MQTT_DISCONNECTED_EVT,	// The bits within the event group to wait for.
+					MQTT_CONNECTED_EVT | MQTT_SENSOR_EVT | MQTT_NOTIF_EVT | MQTT_DISCONNECTED_EVT,	// The bits within the event group to wait for.
 					pdTRUE,			// BIT_0 and BIT_4 should be cleared before returning.
 					pdFALSE,		// Don't wait for both bits, either bit will do.
 					xTicksToWait );	// Wait a maximum of 100ms for either bit to be set.
@@ -445,27 +598,55 @@ static void app_thread(void *arg)
 			//Start the sensor timer
 			xTimerStart(xTimerSensor, 0);
 		}
-		else if(uxBits & MQTT_SENSOR_EVT ) {
+//		else if(uxBits & MQTT_NOTIF_EVT ) {
+//			PRINTF("MQTT_NOTIF_EVT.\r\n");
+//			// Simulate the humidity %, in steps of 5, range is 10% to 100%.
+//			// If the sprinkler is On, the humidity will tent to rise.
+//			//humidity_sensor = get_simulated_sensor(humidity_sensor, 2, 10, 100, sprinklers_on);
+//			//if((samples_cnt++%10) == 9){
+//				err = tcpip_callback(publish_notification, NULL);
+//				if (err != ERR_OK)
+//				{
+//					PRINTF("Failed to invoke publish_notification on the tcpip_thread: %d.\r\n", err);
+//				}
+//			//}
+//		}
+		else if(uxBits & MQTT_SENSOR_EVT )
+		{
 			PRINTF("MQTT_SENSOR_EVT.\r\n");
-			// Simulate the humidity %, in steps of 5, range is 10% to 100%.
-			// If the sprinkler is On, the humidity will tent to rise.
-			humidity_sensor = get_simulated_sensor(humidity_sensor, 2, 10, 100, sprinklers_on);
-			if((samples_cnt++%10) == 9){
-				err = tcpip_callback(publish_humidity, NULL);
-				if (err != ERR_OK)
-				{
-					PRINTF("Failed to invoke publish_humidity on the tcpip_thread: %d.\r\n", err);
-				}
-			}
-		}
-		else if(uxBits & MQTT_SPRINKLERS_EVT ) {
-			PRINTF("MQTT_SPRINKLERS_EVT.\r\n");
-			if(sprinklers_on){
+
+			if(waterpump_on)
+			{
+				/*Turn red led on as well*/
 				GPIO_PortClear(BOARD_LED_GPIO, 1u << BOARD_LED_GPIO_PIN);
+				waterpump_stat = 1;
 			}
-			else {
+			else
+			{	/*Turn red led off*/
 				GPIO_PortSet(BOARD_LED_GPIO, 1u << BOARD_LED_GPIO_PIN);
+				waterpump_stat = 0;
 			}
+
+
+			if (lights_on)
+				/*TODO: Turn the blue led on*/
+				lights_stat = 1;
+			else
+				lights_stat = 0;
+
+			if (air_on)
+				/*TODO: Turn the green led on*/
+				air_stat = 1;
+			else
+				air_stat = 0;
+
+            /*Publish the status according to the incoming topic event*/
+			err = tcpip_callback(publish_status, NULL);
+
+			if (err != ERR_OK)
+			    PRINTF("Failed to invoke publish_notification on the tcpip_thread: %d.\r\n", err);
+
+
 		}
 		else if(uxBits & MQTT_DISCONNECTED_EVT ) {
 			PRINTF("MQTT_DISCONNECTED_EVT.\r\n");
@@ -539,35 +720,35 @@ int main(void)
     return 0;
 }
 
-int32_t get_simulated_sensor(int32_t current_value, int32_t max_step, int32_t min_value, int32_t max_value, bool increase)
-{
-	uint32_t coin;
-	int32_t step;
-	// flip the coin to see if the value increases o decreases:
-	coin = rand()%100;
-	step = (int32_t)rand()%max_step;
-	if(coin > (increase?30:70)){
-		if((current_value + step) <= max_value) {
-			current_value += step;
-		}
-		else {
-			current_value = max_value;
-		}
-	}
-	else {
-		if((current_value - step) >= min_value) {
-			current_value -= step;
-		}
-		else {
-			current_value = min_value;
-		}
-	}
-	return current_value;
-}
+//int32_t get_simulated_sensor(int32_t current_value, int32_t max_step, int32_t min_value, int32_t max_value, bool increase)
+//{
+//	uint32_t coin;
+//	int32_t step;
+//	// flip the coin to see if the value increases o decreases:
+//	coin = rand()%100;
+//	step = (int32_t)rand()%max_step;
+//	if(coin > (increase?30:70)){
+//		if((current_value + step) <= max_value) {
+//			current_value += step;
+//		}
+//		else {
+//			current_value = max_value;
+//		}
+//	}
+//	else {
+//		if((current_value - step) >= min_value) {
+//			current_value -= step;
+//		}
+//		else {
+//			current_value = min_value;
+//		}
+//	}
+//	return current_value;
+//}
 
 void sensor_timer_callback( TimerHandle_t pxTimer )
 {
-	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_EVT);
+//	xEventGroupSetBits(xEventGroup,	MQTT_SENSOR_EVT);
 }
 
 #endif
